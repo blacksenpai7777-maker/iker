@@ -3,8 +3,7 @@ on:
   push: { branches: [ main ] }
   workflow_dispatch:
 permissions:
-  contents: write
-jobs:
+  contents: writejobs:
   build:
     runs-on: ubuntu-latest
     steps:
