@@ -1,0 +1,1560 @@
+name: apk
+on:
+  push: { branches: [ main ] }
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '17' }
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+        with: { gradle-version: '8.7' }
+
+      - name: Proyecto
+        run: |
+          mkdir -p app/src/main/java/com/ovltools/core
+          mkdir -p app/src/main/res/values app/src/main/res/xml
+          mkdir -p app/src/main/res/layout app/src/main/res/drawable
+          mkdir -p app/src/main/res/mipmap-anydpi-v26 app/src/main/assets tools
+
+          cat > settings.gradle.kts <<'EOF'
+          pluginManagement {
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = "ovltools"
+          include(":app")
+          EOF
+
+          cat > build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF
+
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx3072m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          android.nonTransitiveRClass=true
+          kotlin.code.style=official
+          EOF
+
+          cat > app/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          val ksFile = rootProject.file("keystore/release.jks")
+          android {
+              namespace = "com.ovltools.core"
+              compileSdk = 34
+              defaultConfig {
+                  applicationId = "com.ovltools.core"
+                  minSdk = 26
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+              signingConfigs {
+                  create("rel") {
+                      storeFile = ksFile
+                      storePassword = "android"
+                      keyAlias = "ovl"
+                      keyPassword = "android"
+                  }
+              }
+              buildTypes {
+                  release { isMinifyEnabled = false; signingConfig = signingConfigs.getByName("rel") }
+                  debug { signingConfig = signingConfigs.getByName("rel") }
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+              androidResources { noCompress += "tflite" }
+              packaging { resources.excludes += setOf("META-INF/AL2.0", "META-INF/LGPL2.1") }
+              lint { abortOnError = false }
+          }
+          tasks.register("genKeystore") {
+              onlyIf { !ksFile.exists() }
+              doLast {
+                  ksFile.parentFile.mkdirs()
+                  exec {
+                      commandLine("keytool", "-genkeypair", "-keystore", ksFile.absolutePath,
+                          "-storepass", "android", "-keypass", "android", "-alias", "ovl",
+                          "-keyalg", "RSA", "-keysize", "2048", "-validity", "12000",
+                          "-dname", "CN=Overlay Tools, O=ovl, C=ES")
+                  }
+              }
+          }
+          tasks.named("preBuild") { dependsOn("genKeystore") }
+          dependencies {
+              implementation("androidx.core:core-ktx:1.13.1")
+              implementation("androidx.appcompat:appcompat:1.7.0")
+              implementation("com.google.android.material:material:1.12.0")
+              implementation("org.tensorflow:tensorflow-lite:2.16.1")
+              implementation("org.tensorflow:tensorflow-lite-gpu:2.16.1")
+              implementation("dev.rikka.shizuku:api:13.1.5")
+              implementation("dev.rikka.shizuku:provider:13.1.5")
+          }
+          EOF
+
+          cat > app/proguard-rules.pro <<'EOF'
+          -keep class org.tensorflow.lite.** { *; }
+          -keep class rikka.shizuku.** { *; }
+          -dontwarn org.tensorflow.**
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+              <queries><package android:name="moe.shizuku.privileged.api" /></queries>
+              <application android:allowBackup="true" android:icon="@mipmap/ic_launcher"
+                  android:label="@string/app_name" android:supportsRtl="true" android:theme="@style/Theme.Ovl">
+                  <activity android:name=".OnboardActivity" android:exported="true"
+                      android:screenOrientation="fullSensor">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+                  <activity android:name=".MainActivity" android:exported="false" android:screenOrientation="fullSensor" />
+                  <activity android:name=".CalibrateActivity" android:exported="false"
+                      android:screenOrientation="fullSensor" android:theme="@style/Theme.Ovl.Transparent" />
+                  <service android:name=".OverlayService" android:exported="false"
+                      android:foregroundServiceType="mediaProjection" />
+                  <service android:name=".AimAccessibilityService" android:exported="false"
+                      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+                      <intent-filter><action android:name="android.accessibilityservice.AccessibilityService" /></intent-filter>
+                      <meta-data android:name="android.accessibilityservice"
+                          android:resource="@xml/accessibility_service_config" />
+                  </service>
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/res/xml/accessibility_service_config.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:accessibilityEventTypes="typeWindowStateChanged"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:accessibilityFlags="flagDefault"
+              android:canPerformGestures="true"
+              android:canRetrieveWindowContent="false"
+              android:notificationTimeout="0" />
+          EOF
+
+          cat > app/src/main/res/values/strings.xml <<'EOF'
+          <resources>
+              <string name="app_name">Overlay Tools</string>
+              <string name="ch_name">Servicio</string>
+              <string name="n_title">Overlay Tools</string>
+              <string name="n_text">Captura activa</string>
+          </resources>
+          EOF
+
+          cat > app/src/main/res/values/colors.xml <<'EOF'
+          <resources>
+              <color name="bg">#FF12161A</color>
+              <color name="fg">#FFDDE5EC</color>
+              <color name="acc">#FF00E676</color>
+          </resources>
+          EOF
+
+          cat > app/src/main/res/values/themes.xml <<'EOF'
+          <resources>
+              <style name="Theme.Ovl" parent="Theme.Material3.DayNight.NoActionBar">
+                  <item name="android:windowBackground">@color/bg</item>
+              </style>
+              <style name="Theme.Ovl.Transparent" parent="Theme.Ovl">
+                  <item name="android:windowIsTranslucent">true</item>
+                  <item name="android:windowBackground">@android:color/transparent</item>
+                  <item name="android:windowNoTitle">true</item>
+              </style>
+          </resources>
+          EOF
+
+          cat > app/src/main/res/drawable/ic_fg.xml <<'EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp" android:height="108dp"
+              android:viewportWidth="108" android:viewportHeight="108">
+              <path android:fillColor="#3A3E44" android:pathData="M20,20h68v68h-68z" />
+              <path android:strokeColor="#CDD2D8" android:strokeWidth="3" android:fillColor="#00000000"
+                  android:pathData="M54,30 L54,42 M54,66 L54,78 M30,54 L42,54 M66,54 L78,54" />
+          </vector>
+          EOF
+
+          cat > app/src/main/res/drawable/ic_stat.xml <<'EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="24dp" android:height="24dp"
+              android:viewportWidth="24" android:viewportHeight="24">
+              <path android:fillColor="#FFFFFFFF"
+                  android:pathData="M12,2 L12,7 M12,17 L12,22 M2,12 L7,12 M17,12 L22,12" />
+          </vector>
+          EOF
+
+          cat > app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+              <background android:drawable="@color/bg" />
+              <foreground android:drawable="@drawable/ic_fg" />
+          </adaptive-icon>
+          EOF
+          echo "recursos ok"- name: Codigo
+    run: |
+      cat > app/src/main/java/com/ovltools/core/Cfg.kt <<'EOF'
+      package com.ovltools.core
+      import android.content.Context
+      object Cfg {
+          @Volatile var enabled = true
+          @Volatile var fov = 200
+          @Volatile var smoothMsPerPx = 0.62f
+          @Volatile var reactionMs = 120
+          @Volatile var jitter = 2f
+          @Volatile var aimPoint = 0
+          @Volatile var mode = 0
+          @Volatile var fps = 20
+          @Volatile var conf = 0.40f
+          @Volatile var gain = 1.0f
+          @Volatile var deadZone = 5f
+          @Volatile var anchorFx = 0.5f
+          @Volatile var anchorFy = 0.5f
+          @Volatile var showBoxes = true
+          private const val P = "ovl"
+          fun load(c: Context) {
+              val s = c.getSharedPreferences(P, Context.MODE_PRIVATE)
+              enabled = s.getBoolean("enabled", true)
+              fov = s.getInt("fov", 200)
+              smoothMsPerPx = s.getFloat("smooth", 0.62f)
+              reactionMs = s.getInt("reaction", 120)
+              jitter = s.getFloat("jitter", 2f)
+              aimPoint = s.getInt("aim", 0)
+              mode = s.getInt("mode", 0)
+              fps = s.getInt("fps", 20)
+              conf = s.getFloat("conf", 0.40f)
+              gain = s.getFloat("gain", 1.0f)
+              deadZone = s.getFloat("dead", 5f)
+              anchorFx = s.getFloat("afx", 0.5f)
+              anchorFy = s.getFloat("afy", 0.5f)
+              showBoxes = s.getBoolean("boxes", true)
+          }
+          fun save(c: Context) {
+              c.getSharedPreferences(P, Context.MODE_PRIVATE).edit()
+                  .putBoolean("enabled", enabled).putInt("fov", fov).putFloat("smooth", smoothMsPerPx)
+                  .putInt("reaction", reactionMs).putFloat("jitter", jitter).putInt("aim", aimPoint)
+                  .putInt("mode", mode).putInt("fps", fps).putFloat("conf", conf).putFloat("gain", gain)
+                  .putFloat("dead", deadZone).putFloat("afx", anchorFx).putFloat("afy", anchorFy)
+                  .putBoolean("boxes", showBoxes).apply()
+          }
+      }
+      EOF
+
+      cat > app/src/main/java/com/ovltools/core/Diag.kt <<'EOF'
+      package com.ovltools.core
+      object Diag {
+          @Volatile var infMs = 0f
+          @Volatile var targets = 0
+          @Volatile var state = "parado"
+          @Volatile var model = "no cargado"
+          @Volatile var backend = "-"
+          @Volatile var thermal = 0
+          @Volatile var locked = false
+      }
+      EOF
+
+      cat > app/src/main/java/com/ovltools/core/ProfileStore.kt <<'EOF'
+      package com.ovltools.core
+      import android.content.Context
+      import org.json.JSONObject
+      import java.io.File
+      object ProfileStore {
+          private fun dir(c: Context) = File(c.filesDir, "profiles").apply { mkdirs() }
+          fun list(c: Context): List<String> =
+              dir(c).listFiles()?.filter { it.name.endsWith(".json") }?.map { it.name.removeSuffix(".json") }?.sorted() ?: emptyList()
+          fun save(c: Context, name: String) {
+              val o = JSONObject()
+              o.put("fov", Cfg.fov); o.put("smooth", Cfg.smoothMsPerPx.toDouble())
+              o.put("reaction", Cfg.reactionMs); o.put("jitter", Cfg.jitter.toDouble())
+              o.put("aim", Cfg.aimPoint); o.put("mode", Cfg.mode); o.put("fps", Cfg.fps)
+              o.put("conf", Cfg.conf.toDouble()); o.put("gain", Cfg.gain.toDouble())
+              o.put("dead", Cfg.deadZone.toDouble())
+              File(dir(c), name.filter { it.isLetterOrDigit() || it == '_' || it == '-' } + ".json").writeText(o.toString(2))
+          }
+          fun load(c: Context, name: String): Boolean {
+              val f = File(dir(c), "$name.json")
+              if (!f.exists()) return false
+              return try {
+                  val o = JSONObject(f.readText())
+                  Cfg.fov = o.optInt("fov", Cfg.fov)
+                  Cfg.smoothMsPerPx = o.optDouble("smooth", Cfg.smoothMsPerPx.toDouble()).toFloat()
+                  Cfg.reactionMs = o.optInt("reaction", Cfg.reactionMs)
+                  Cfg.jitter = o.optDouble("jitter", Cfg.jitter.toDouble()).toFloat()
+                  Cfg.aimPoint = o.optInt("aim", Cfg.aimPoint)
+                  Cfg.mode = o.optInt("mode", Cfg.mode)
+                  Cfg.fps = o.optInt("fps", Cfg.fps)
+                  Cfg.conf = o.optDouble("conf", Cfg.conf.toDouble()).toFloat()
+                  Cfg.gain = o.optDouble("gain", Cfg.gain.toDouble()).toFloat()
+                  Cfg.deadZone = o.optDouble("dead", Cfg.deadZone.toDouble()).toFloat()
+                  Cfg.save(c); true
+              } catch (_: Throwable) { false }
+          }
+          fun delete(c: Context, name: String) { File(dir(c), "$name.json").delete() }
+          fun exportJson(): String {
+              val o = JSONObject()
+              o.put("fov", Cfg.fov); o.put("smooth", Cfg.smoothMsPerPx.toDouble())
+              o.put("reaction", Cfg.reactionMs); o.put("jitter", Cfg.jitter.toDouble())
+              o.put("aim", Cfg.aimPoint); o.put("mode", Cfg.mode); o.put("fps", Cfg.fps)
+              o.put("conf", Cfg.conf.toDouble()); o.put("gain", Cfg.gain.toDouble())
+              return o.toString(2)
+          }
+          fun importJson(c: Context, t: String): Boolean = try {
+              val o = JSONObject(t)
+              Cfg.fov = o.optInt("fov", Cfg.fov)
+              Cfg.smoothMsPerPx = o.optDouble("smooth", Cfg.smoothMsPerPx.toDouble()).toFloat()
+              Cfg.reactionMs = o.optInt("reaction", Cfg.reactionMs)
+              Cfg.jitter = o.optDouble("jitter", Cfg.jitter.toDouble()).toFloat()
+              Cfg.aimPoint = o.optInt("aim", Cfg.aimPoint)
+              Cfg.mode = o.optInt("mode", Cfg.mode)
+              Cfg.fps = o.optInt("fps", Cfg.fps)
+              Cfg.conf = o.optDouble("conf", Cfg.conf.toDouble()).toFloat()
+              Cfg.gain = o.optDouble("gain", Cfg.gain.toDouble()).toFloat()
+              Cfg.save(c); true
+          } catch (_: Throwable) { false }
+      }
+      EOF
+
+      cat > app/src/main/java/com/ovltools/core/Detector.kt <<'EOF'
+      package com.ovltools.core
+      import android.content.Context
+      import android.graphics.Bitmap
+      import android.graphics.Canvas
+      import org.tensorflow.lite.DataType
+      import org.tensorflow.lite.Interpreter
+      import org.tensorflow.lite.gpu.CompatibilityList
+      import org.tensorflow.lite.gpu.GpuDelegate
+      import java.io.FileInputStream
+      import java.nio.ByteBuffer
+      import java.nio.ByteOrder
+      import java.nio.channels.FileChannel
+      data class Det(val cx: Float, val cy: Float, val w: Float, val h: Float, val score: Float)
+      class Detector(private val ctx: Context) {
+          private var itp: Interpreter? = null
+          private var gpu: GpuDelegate? = null
+          var ready = false; private set
+          var backend = "-"; private set
+          var error = ""; private set
+          private var inW = 320
+          private var inH = 320
+          private var quantIn = false
+          private var inScale = 1f
+          private var inZero = 0
+          fun init() {
+              close(); error = ""
+              val buf = load("aim_v8n_int8.tflite")
+              if (buf == null) { error = "asset ausente"; return }
+              val opts = Interpreter.Options()
+              val compat = CompatibilityList()
+              if (compat.isDelegateSupportedOnThisDevice) {
+                  try {
+                      gpu = GpuDelegate(GpuDelegate.Options().setQuantizedModelsAllowed(true))
+                      opts.addDelegate(gpu); backend = "GPU"
+                  } catch (_: Throwable) { gpu = null }
+              }
+              if (gpu == null) { opts.setNumThreads(4); opts.setUseXNNPACK(true); backend = "XNNPACK" }
+              val i = try { Interpreter(buf, opts) } catch (_: Throwable) {
+                  try { Interpreter(buf) } catch (_: Throwable) { error = "modelo ilegible"; return }
+              }
+              itp = i
+              val t = i.getInputTensor(0)
+              inH = t.shape()[1]; inW = t.shape()[2]
+              quantIn = t.dataType() == DataType.UINT8
+              if (quantIn) { inScale = t.quantizationParams().scale; inZero = t.quantizationParams().zeroPoint }
+              ready = true
+          }
+          fun close() {
+              ready = false
+              try { itp?.close() } catch (_: Throwable) {}
+              try { gpu?.close() } catch (_: Throwable) {}
+              itp = null; gpu = null
+          }
+          private fun load(n: String): ByteBuffer? = try {
+              val fd = ctx.assets.openFd(n)
+              FileInputStream(fd.fileDescriptor).use { fis ->
+                  fis.channel.map(FileChannel.MapMode.READ_ONLY, fd.startOffset, fd.declaredLength)
+              }
+          } catch (_: Throwable) { null }
+          fun infer(crop: Bitmap, conf: Float, hudTop: Int, mini: Int): List<Det> {
+              val i = itp ?: return emptyList()
+              if (!ready) return emptyList()
+              val bw = crop.width; val bh = crop.height
+              if (bw < 8 || bh < 8) return emptyList()
+              val s = minOf(inW.toFloat() / bw, inH.toFloat() / bh)
+              val dw = (bw * s).toInt().coerceAtLeast(1)
+              val dh = (bh * s).toInt().coerceAtLeast(1)
+              val ox = (inW - dw) / 2
+              val oy = (inH - dh) / 2
+              val sc = Bitmap.createScaledBitmap(crop, dw, dh, true)
+              val cv = Bitmap.createBitmap(inW, inH, Bitmap.Config.ARGB_8888)
+              cv.eraseColor(0xFF727272.toInt())
+              Canvas(cv).drawBitmap(sc, ox.toFloat(), oy.toFloat(), null)
+              sc.recycle()
+              val px = IntArray(inW * inH)
+              cv.getPixels(px, 0, inW, 0, 0, inW, inH)
+              cv.recycle()
+              val qb = ByteBuffer.allocateDirect(inW * inH * 3).order(ByteOrder.nativeOrder())
+              val fb = ByteBuffer.allocateDirect(inW * inH * 3 * 4).order(ByteOrder.nativeOrder())
+              for (p in px) {
+                  for (c in intArrayOf((p shr 16) and 0xFF, (p shr 8) and 0xFF, p and 0xFF)) {
+                      if (quantIn) qb.put((c / 255f / inScale + inZero).toInt().coerceIn(0, 255).toByte())
+                      else fb.putFloat(c / 255f)
+                  }
+              }
+              qb.rewind(); fb.rewind()
+              val shape = i.getOutputTensor(0).shape()
+              var c1 = shape[1]; var n1 = shape[2]; var tr = false
+              if (c1 > n1) { val t = c1; c1 = n1; n1 = t; tr = true }
+              val out = Array(1) { Array(c1) { FloatArray(n1) } }
+              try { i.run(if (quantIn) qb else fb, out) } catch (_: Throwable) { return emptyList() }
+              val nc = c1 - 4
+              if (nc < 1) return emptyList()
+              val raw = ArrayList<Det>(64)
+              for (idx in 0 until n1) {
+                  var best = 0f; var bc = 0
+                  for (c in 0 until nc) {
+                      val v = if (tr) out[0][idx][4 + c] else out[0][4 + c][idx]
+                      if (v > best) { best = v; bc = c }
+                  }
+                  if (bc != 0 || best < conf) continue
+                  val w = if (tr) out[0][idx][2] else out[0][2][idx]
+                  val h = if (tr) out[0][idx][3] else out[0][3][idx]
+                  if (h < 8f || w < 3f) continue
+                  val ar = h / w
+                  if (ar < 1.15f || ar > 6.5f) continue
+                  val cx = if (tr) out[0][idx][0] else out[0][0][idx]
+                  val cy = if (tr) out[0][idx][1] else out[0][1][idx]
+                  val x = (cx - w / 2f - ox) / s
+                  val y = (cy - h / 2f - oy) / s
+                  val ww = w / s; val hh = h / s
+                  if (y + hh < hudTop) continue
+                  if (x + ww < mini && y + hh < mini) continue
+                  raw.add(Det(x + ww / 2f, y + hh / 2f, ww, hh, best))
+              }
+              return nms(raw).take(12)
+          }
+          private fun nms(l: List<Det>): List<Det> {
+              val o = ArrayList<Det>()
+              for (d in l.sortedByDescending { it.score }) {
+                  var drop = false
+                  for (k in o) {
+                      val iw = minOf(d.cx + d.w / 2, k.cx + k.w / 2) - maxOf(d.cx - d.w / 2, k.cx - k.w / 2)
+                      val ih = minOf(d.cy + d.h / 2, k.cy + k.h / 2) - maxOf(d.cy - d.h / 2, k.cy - k.h / 2)
+                      if (iw <= 0 || ih <= 0) continue
+                      val inter = iw * ih
+                      if (inter / (d.w * d.h + k.w * k.h - inter) > 0.45f) { drop = true; break }
+                  }
+                  if (!drop) o.add(d)
+              }
+              return o
+          }
+      }
+      EOF
+
+      cat > app/src/main/java/com/ovltools/core/Aimer.kt <<'EOF'
+      package com.ovltools.core
+      import kotlin.math.hypot
+      import kotlin.random.Random
+      data class Shot(val dx: Float, val dy: Float, val ms: Int)
+      class Aimer {
+          private var lx = 0f
+          private var ly = 0f
+          private var lh = 0f
+          private var seen = 0L
+          private var phase = 0
+          private var tStart = 0L
+          private var tFire = 0L
+          private var prev = 0f
+          private var over = false
+          private var jx = 0f
+          private var jy = 0f
+          fun reset() { phase = 0; seen = 0L }
+          private fun tgt(d: Det): FloatArray {
+              val y = when (Cfg.aimPoint) {
+                  0 -> d.cy - d.h * 0.37f
+                  1 -> d.cy - d.h * 0.26f
+                  else -> d.cy - d.h * 0.10f
+              }
+              return floatArrayOf(d.cx, y)
+          }
+          private fun matches(d: Det) = hypot(d.cx - lx, d.cy - ly) <= maxOf(30f, lh * 0.6f)
+          private fun ease(t: Float): Float {
+              val x = t.coerceIn(0f, 1f)
+              return 1f - (1f - x) * (1f - x) * (1f - x)
+          }
+          fun step(dets: List<Det>, ax: Float, ay: Float, now: Long, active: Boolean): Shot? {
+              if (!active) { reset(); return null }
+              val c = dets.map { it to tgt(it) }
+                  .map { Triple(it.first, it.second, hypot(it.second[0] - ax, it.second[1] - ay)) }
+                  .filter { it.third <= Cfg.fov }
+              if (c.isEmpty()) { if (phase != 0 && now - seen > 300) reset(); return null }
+              val hit = c.firstOrNull { matches(it.first) }
+              val t = hit ?: c.minByOrNull { it.third }!!
+              if (hit != null) { seen = now; lx = t.first.cx; ly = t.first.cy; lh = t.first.h }
+              else {
+                  lx = t.first.cx; ly = t.first.cy; lh = t.first.h; seen = now
+                  phase = 1; tFire = now + Cfg.reactionMs
+                  jx = (Random.nextFloat() - 0.5f) * Cfg.jitter
+                  jy = (Random.nextFloat() - 0.5f) * Cfg.jitter
+                  prev = 0f; over = false
+              }
+              val ex = t.second[0] + jx - ax
+              val ey = t.second[1] + jy - ay
+              val err = hypot(ex, ey)
+              if (err <= Cfg.deadZone && phase == 3) return null
+              if (now < tFire) return null
+              if (phase == 1) { phase = 2; tStart = now; prev = 0f }
+              var mx = 0f; var my = 0f
+              when (phase) {
+                  2 -> {
+                      val dur = ((0.05f + 0.4f * Cfg.smoothMsPerPx) * (0.6f + minOf(1.6f, err / 400f)) * 1000f).toLong()
+                      val p = ((now - tStart).toFloat() / maxOf(dur, 20L)).coerceIn(0f, 1f)
+                      val f = ease(p) - ease(prev)
+                      prev = p; mx = ex * f; my = ey * f
+                      if (p >= 1f) {
+                          if (err > 3f) { tStart = now; prev = 0f }
+                          else {
+                              phase = 3; over = true
+                              val n = if (err < 0.01f) 1f else err
+                              mx += ex / n * (1f + Random.nextFloat() * 2f)
+                              my += ey / n * (1f + Random.nextFloat() * 2f)
+                          }
+                      }
+                  }
+                  3 -> {
+                      val g = if (over) 0.55f else 0.28f
+                      over = false
+                      mx = ex * g + (Random.nextFloat() - 0.5f)
+                      my = ey * g + (Random.nextFloat() - 0.5f)
+                      if (err < 0.7f) { mx = 0f; my = 0f }
+                  }
+                  else -> return null
+              }
+              if (mx == 0f && my == 0f) return null
+              val g = Cfg.gain.coerceAtLeast(0.2f)
+              val dx = mx / g; val dy = my / g
+              val d = hypot(dx, dy)
+              if (d < 0.7f) return null
+              return Shot(dx, dy, (d * Cfg.smoothMsPerPx).toInt().coerceIn(40, 220))
+          }
+      }
+      EOF
+      echo "logica ok"- name: Resto del codigo
+        run: |
+          cat > app/src/main/java/com/ovltools/core/GestureInjector.kt <<'EOF'
+          package com.ovltools.core
+          import android.accessibilityservice.AccessibilityService
+          import android.accessibilityservice.GestureDescription
+          import android.graphics.Path
+          import kotlin.math.hypot
+          class GestureInjector(private val svc: AccessibilityService) {
+              @Volatile private var busy = false
+              private var accX = 0f
+              private var accY = 0f
+              private var chain = false
+              private var last: GestureDescription.StrokeDescription? = null
+              private var endX = 0f
+              private var endY = 0f
+              private var startX = 0f
+              private var startY = 0f
+              fun setStart(x: Float, y: Float) { startX = x; startY = y; endX = x; endY = y }
+              fun queue(dx: Float, dy: Float, ms: Int) {
+                  accX += dx; accY += dy
+                  if (busy || hypot(accX, accY) < 1.2f) return
+                  fire(ms)
+              }
+              private fun fire(ms: Int) {
+                  if (hypot(accX, accY) < 0.8f) return
+                  busy = true
+                  val cont = chain && last != null
+                  val p = Path()
+                  if (cont) p.moveTo(endX, endY) else { p.moveTo(startX, startY); endX = startX; endY = startY }
+                  endX += accX; endY += accY
+                  p.lineTo(endX, endY)
+                  accX = 0f; accY = 0f
+                  val st = try {
+                      if (cont) last!!.continueStroke(p, 0, ms.toLong(), true)
+                      else GestureDescription.StrokeDescription(p, 0, ms.toLong(), true)
+                  } catch (_: Throwable) { busy = false; chain = false; last = null; return }
+                  last = st; chain = true
+                  svc.dispatchGesture(GestureDescription.Builder().addStroke(st).build(),
+                      object : AccessibilityService.GestureResultCallback() {
+                          override fun onCompleted(g: GestureDescription?) { busy = false }
+                          override fun onCancelled(g: GestureDescription?) { busy = false; chain = false; last = null }
+                      }, null)
+              }
+              fun end() {
+                  if (!chain || last == null || busy) { chain = false; last = null; return }
+                  busy = true
+                  val p = Path(); p.moveTo(endX, endY); p.lineTo(endX + 0.6f, endY + 0.6f)
+                  val s = try { last!!.continueStroke(p, 0, 16, false) } catch (_: Throwable) {
+                      busy = false; chain = false; last = null; return
+                  }
+                  svc.dispatchGesture(GestureDescription.Builder().addStroke(s).build(),
+                      object : AccessibilityService.GestureResultCallback() {
+                          override fun onCompleted(g: GestureDescription?) { busy = false }
+                          override fun onCancelled(g: GestureDescription?) { busy = false }
+                      }, null)
+                  chain = false; last = null
+              }
+          }
+          EOF
+
+          cat > app/src/main/java/com/ovltools/core/ShizukuInjector.kt <<'EOF'
+          package com.ovltools.core
+          import android.content.pm.PackageManager
+          import android.os.IBinder
+          import android.os.SystemClock
+          import android.view.InputDevice
+          import android.view.MotionEvent
+          import rikka.shizuku.Shizuku
+          import rikka.shizuku.ShizukuBinderWrapper
+          import rikka.shizuku.SystemServiceHelper
+          import java.lang.reflect.Method
+          object ShizukuInjector {
+              private var proxy: Any? = null
+              private var method: Method? = null
+              @Volatile var ready = false; private set
+              fun init(): Boolean {
+                  ready = false
+                  if (!Shizuku.pingBinder()) return false
+                  if (Shizuku.isPreV11()) return false
+                  if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) return false
+                  return try {
+                      val b: IBinder = SystemServiceHelper.getSystemService("input") ?: return false
+                      val stub = Class.forName("android.hardware.input.IInputManager\$Stub")
+                      val asI = stub.getMethod("asInterface", IBinder::class.java)
+                      proxy = asI.invoke(null, ShizukuBinderWrapper(b)) ?: return false
+                      method = proxy!!.javaClass.getMethod("injectInputEvent",
+                          android.view.InputEvent::class.java, Int::class.javaPrimitiveType)
+                      ready = true; true
+                  } catch (_: Throwable) { ready = false; false }
+              }
+              fun down(x: Float, y: Float) = send(MotionEvent.ACTION_DOWN, x, y)
+              fun move(x: Float, y: Float) = send(MotionEvent.ACTION_MOVE, x, y)
+              fun up(x: Float, y: Float) = send(MotionEvent.ACTION_UP, x, y)
+              private fun send(a: Int, x: Float, y: Float) {
+                  val m = method ?: return
+                  val p = proxy ?: return
+                  val n = SystemClock.uptimeMillis()
+                  val e = MotionEvent.obtain(n, n, a, x, y, 0)
+                  e.source = InputDevice.SOURCE_TOUCHSCREEN
+                  try { m.invoke(p, e, 2) } catch (_: Throwable) {}
+                  e.recycle()
+              }
+          }
+          EOF
+
+          cat > app/src/main/java/com/ovltools/core/Capture.kt <<'EOF'
+          package com.ovltools.core
+          import android.graphics.Bitmap
+          import android.graphics.PixelFormat
+          import android.hardware.display.DisplayManager
+          import android.hardware.display.VirtualDisplay
+          import android.media.Image
+          import android.media.ImageReader
+          import android.media.projection.MediaProjection
+          import android.os.Handler
+          import android.os.HandlerThread
+          import java.nio.ByteBuffer
+          class Capture(private val proj: MediaProjection, private val rw: Int,
+                        private val rh: Int, private val density: Int) {
+              var scale = 1f; private set
+              var w = 2; private set
+              var h = 2; private set
+              private val th = HandlerThread("cap").apply { start() }
+              private val hd = Handler(th.looper)
+              private var rd: ImageReader? = null
+              private var vd: VirtualDisplay? = null
+              @Volatile private var latest: Bitmap? = null
+              @Volatile private var busy = false
+              fun start(): Boolean {
+                  scale = minOf(1f, 640f / maxOf(rw, rh))
+                  w = (rw * scale).toInt().coerceAtLeast(2)
+                  h = (rh * scale).toInt().coerceAtLeast(2)
+                  return try {
+                      val r = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 3)
+                      rd = r
+                      r.setOnImageAvailableListener({ x -> onImage(x) }, hd)
+                      vd = proj.createVirtualDisplay("cap", w, h,
+                          (density * scale).toInt().coerceAtLeast(72),
+                          DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, r.surface, null, hd)
+                      vd != null
+                  } catch (_: Throwable) { false }
+              }
+              private fun onImage(r: ImageReader) {
+                  val img: Image = try { r.acquireLatestImage() } catch (_: Throwable) { return } ?: return
+                  try {
+                      if (busy) return
+                      busy = true
+                      toBitmap(img)?.let { b -> latest?.recycle(); latest = b }
+                  } catch (_: Throwable) {
+                  } finally {
+                      try { img.close() } catch (_: Throwable) {}
+                      busy = false
+                  }
+              }
+              private fun toBitmap(img: Image): Bitmap? = try {
+                  val pl = img.planes[0]
+                  val buf: ByteBuffer = pl.buffer
+                  val rs = pl.rowStride
+                  val rb = w * pl.pixelStride
+                  val out = ByteBuffer.allocate(w * h * 4)
+                  val row = ByteArray(rs)
+                  for (y in 0 until h) {
+                      buf.position(y * rs)
+                      val n = minOf(rs, buf.remaining())
+                      buf.get(row, 0, n)
+                      out.put(row, 0, minOf(rb, n))
+                      if (n < rb) for (i in 0 until (rb - n)) out.put(0)
+                  }
+                  out.rewind()
+                  val b = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                  b.copyPixelsFromBuffer(out); b
+              } catch (_: Throwable) { null }
+              fun latest(): Bitmap? = latest
+              fun stop() {
+                  try { vd?.release() } catch (_: Throwable) {}
+                  try { rd?.close() } catch (_: Throwable) {}
+                  latest?.recycle(); latest = null
+                  th.quitSafely()
+              }
+          }
+          EOF
+
+          cat > app/src/main/java/com/ovltools/core/OverlayView.kt <<'EOF'
+          package com.ovltools.core
+          import android.content.Context
+          import android.graphics.Canvas
+          import android.graphics.Color
+          import android.graphics.Paint
+          import android.view.View
+          class OverlayView(c: Context) : View(c) {
+              private val p = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = 2.5f }
+              @Volatile private var boxes: List<FloatArray> = emptyList()
+              @Volatile private var active = false
+              fun setBoxes(b: List<FloatArray>) { boxes = b; postInvalidateOnAnimation() }
+              fun setActive(a: Boolean) { if (a != active) { active = a; postInvalidateOnAnimation() } }
+              override fun onDraw(cv: Canvas) {
+                  p.color = if (active) Color.parseColor("#00E676") else Color.parseColor("#8892A0")
+                  cv.drawCircle(Cfg.anchorFx * width, Cfg.anchorFy * height, Cfg.fov.toFloat(), p)
+                  p.strokeWidth = 1.5f
+                  for (b in boxes) cv.drawRect(b[0], b[1], b[2], b[3], p)
+                  p.strokeWidth = 2.5f
+              }
+          }
+          EOF
+
+          cat > app/src/main/java/com/ovltools/core/AnchorView.kt <<'EOF'
+          package com.ovltools.core
+          import android.content.Context
+          import android.graphics.Canvas
+          import android.graphics.Color
+          import android.graphics.Paint
+          import android.view.MotionEvent
+          import android.view.View
+          class AnchorView(c: Context) : View(c) {
+              private val p = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                  color = Color.parseColor("#00E676"); strokeWidth = 3f; style = Paint.Style.STROKE
+              }
+              private var dx = 0f
+              private var dy = 0f
+              private var ox = 0f
+              private var oy = 0f
+              override fun onDraw(cv: Canvas) {
+                  val x = Cfg.anchorFx * width
+                  val y = Cfg.anchorFy * height
+                  cv.drawCircle(x, y, 11f, p)
+                  cv.drawLine(x - 20f, y, x - 6f, y, p)
+                  cv.drawLine(x + 6f, y, x + 20f, y, p)
+                  cv.drawLine(x, y - 20f, x, y - 6f, p)
+                  cv.drawLine(x, y + 6f, x, y + 20f, p)
+              }
+              override fun onTouchEvent(e: MotionEvent): Boolean {
+                  when (e.actionMasked) {
+                      MotionEvent.ACTION_DOWN -> {
+                          dx = e.x; dy = e.y
+                          ox = Cfg.anchorFx * width; oy = Cfg.anchorFy * height
+                          return true
+                      }
+                      MotionEvent.ACTION_MOVE -> {
+                          Cfg.anchorFx = (ox + e.x - dx).coerceIn(20f, width - 20f) / width
+                          Cfg.anchorFy = (oy + e.y - dy).coerceIn(20f, height - 20f) / height
+                          invalidate(); return true
+                      }
+                  }
+                  return super.onTouchEvent(e)
+              }
+          }
+          EOF
+          echo "injectores ok"- name: Panel y servicios
+    run: |
+      cat > app/src/main/java/com/ovltools/core/PanelView.kt <<'EOF'
+      package com.ovltools.core
+      import android.content.Context
+      import android.graphics.Color
+      import android.util.TypedValue
+      import android.view.Gravity
+      import android.view.MotionEvent
+      import android.widget.LinearLayout
+      import android.widget.TextView
+      class PanelView(c: Context) : LinearLayout(c) {
+          var onFov: ((Int) -> Unit)? = null
+          var onSmooth: ((Int) -> Unit)? = null
+          var onReact: ((Int) -> Unit)? = null
+          var onAim: (() -> Unit)? = null
+          var onMode: (() -> Unit)? = null
+          var onCalibrate: (() -> Unit)? = null
+          var onSettings: (() -> Unit)? = null
+          var onStop: (() -> Unit)? = null
+          var onHold: ((Boolean) -> Unit)? = null
+          private val lbl: TextView
+          init {
+              orientation = VERTICAL
+              setBackgroundColor(Color.parseColor("#D9101418"))
+              setPadding(12, 8, 12, 8)
+              lbl = TextView(c).apply {
+                  setTextColor(Color.parseColor("#00E676"))
+                  setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+                  gravity = Gravity.CENTER
+              }
+              addView(lbl)
+              addView(mk("AIM", true))
+              addView(mk("FOV-") { onFov?.invoke(-10) })
+              addView(mk("FOV+") { onFov?.invoke(10) })
+              addView(mk("Suave-") { onSmooth?.invoke(-5) })
+              addView(mk("Suave+") { onSmooth?.invoke(5) })
+              addView(mk("Ret-") { onReact?.invoke(-10) })
+              addView(mk("Ret+") { onReact?.invoke(10) })
+              addView(mk("Punto") { onAim?.invoke() })
+              addView(mk("Modo") { onMode?.invoke() })
+              addView(mk("Calib") { onCalibrate?.invoke() })
+              addView(mk("Ajustes") { onSettings?.invoke() })
+              addView(mk("STOP") { onStop?.invoke() })
+              refresh()
+          }
+          private fun mk(t: String, hold: Boolean = false, f: (() -> Unit)? = null): TextView {
+              val v = TextView(context).apply {
+                  text = t
+                  setTextColor(Color.parseColor("#DDE5EC"))
+                  setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                  gravity = Gravity.CENTER
+                  setPadding(8, 9, 8, 9)
+              }
+              if (hold) {
+                  v.setOnTouchListener { _, e ->
+                      when (e.actionMasked) {
+                          MotionEvent.ACTION_DOWN -> {
+                              v.setBackgroundColor(Color.parseColor("#3300E676")); onHold?.invoke(true); true
+                          }
+                          MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                              v.setBackgroundColor(Color.TRANSPARENT); onHold?.invoke(false); true
+                          }
+                          else -> true
+                      }
+                  }
+              } else v.setOnClickListener { f?.invoke() }
+              return v
+          }
+          fun refresh() {
+              val a = when (Cfg.aimPoint) { 0 -> "cab"; 1 -> "cue"; else -> "pec" }
+              val m = if (Cfg.mode == 0) "hold" else "auto"
+              lbl.text = "F${Cfg.fov} S${(Cfg.smoothMsPerPx * 100).toInt()} R${Cfg.reactionMs} $a $m"
+              invalidate()
+          }
+      }
+      EOF
+
+      cat > app/src/main/java/com/ovltools/core/AimAccessibilityService.kt <<'EOF'
+      package com.ovltools.core
+      import android.accessibilityservice.AccessibilityService
+      import android.content.Intent
+      import android.view.accessibility.AccessibilityEvent
+      class AimAccessibilityService : AccessibilityService() {
+          companion object {
+              @Volatile var instance: AimAccessibilityService? = null
+              fun alive() = instance != null
+          }
+          var injector: GestureInjector? = null
+              private set
+          override fun onServiceConnected() {
+              super.onServiceConnected()
+              instance = this
+              injector = GestureInjector(this)
+          }
+          override fun onAccessibilityEvent(e: AccessibilityEvent?) {}
+          override fun onInterrupt() {}
+          override fun onUnbind(i: Intent?): Boolean {
+              instance = null; injector = null
+              return super.onUnbind(i)
+          }
+      }
+      EOF
+      echo "panel ok"- name: Servicio
+        run: |
+          cat > app/src/main/java/com/ovltools/core/OverlayService.kt <<'EOF'
+          package com.ovltools.core
+          import android.app.Activity
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.Service
+          import android.content.BroadcastReceiver
+          import android.content.Context
+          import android.content.Intent
+          import android.content.IntentFilter
+          import android.content.pm.ServiceInfo
+          import android.graphics.Bitmap
+          import android.graphics.PixelFormat
+          import android.hardware.display.DisplayManager
+          import android.media.projection.MediaProjection
+          import android.media.projection.MediaProjectionManager
+          import android.os.Build
+          import android.os.Handler
+          import android.os.HandlerThread
+          import android.os.IBinder
+          import android.os.PowerManager
+          import android.os.SystemClock
+          import android.util.DisplayMetrics
+          import android.view.Display
+          import android.view.Gravity
+          import android.view.MotionEvent
+          import android.view.View
+          import android.view.WindowManager
+          import android.widget.FrameLayout
+          import androidx.core.app.NotificationCompat
+          class OverlayService : Service() {
+              companion object {
+                  const val A_START = "start"
+                  const val E_CODE = "code"
+                  const val E_DATA = "data"
+                  const val CH = "ovl_svc"
+                  @Volatile var running = false
+                  @Volatile var holdPressed = false
+              }
+              private lateinit var wm: WindowManager
+              private var panel: PanelView? = null
+              private var anchor: AnchorView? = null
+              private var canvas: OverlayView? = null
+              private var proj: MediaProjection? = null
+              private var cap: Capture? = null
+              private val det = Detector(this)
+              private val aimer = Aimer()
+              private lateinit var bg: HandlerThread
+              private lateinit var loop: Handler
+              private var sw = 0
+              private var sh = 0
+              private var thermalLow = false
+              private var fails = 0
+              private val srecv = object : BroadcastReceiver() {
+                  override fun onReceive(c: Context?, i: Intent?) {
+                      when (i?.action) {
+                          Intent.ACTION_SCREEN_OFF -> stopCapture()
+                          Intent.ACTION_SCREEN_ON -> if (proj != null) startCapture()
+                      }
+                  }
+              }
+              private val dlist = object : DisplayManager.DisplayListener {
+                  override fun onDisplayAdded(id: Int) {}
+                  override fun onDisplayRemoved(id: Int) {}
+                  override fun onDisplayChanged(id: Int) {
+                      if (id == Display.DEFAULT_DISPLAY) {
+                          val dm = DisplayMetrics()
+                          @Suppress("DEPRECATION") wm.defaultDisplay.getRealMetrics(dm)
+                          if (dm.widthPixels != sw || dm.heightPixels != sh) {
+                              sw = dm.widthPixels; sh = dm.heightPixels; restart()
+                          }
+                      }
+                  }
+              }
+              override fun onBind(i: Intent?): IBinder? = null
+              override fun onCreate() {
+                  super.onCreate()
+                  wm = getSystemService(WINDOW_SERVICE) as WindowManager
+                  Cfg.load(this)
+                  val dm = DisplayMetrics()
+                  @Suppress("DEPRECATION") wm.defaultDisplay.getRealMetrics(dm)
+                  sw = dm.widthPixels; sh = dm.heightPixels
+                  bg = HandlerThread("ovl").apply { start() }
+                  loop = Handler(bg.looper)
+                  registerReceiver(srecv, IntentFilter().apply {
+                      addAction(Intent.ACTION_SCREEN_OFF); addAction(Intent.ACTION_SCREEN_ON)
+                  })
+                  (getSystemService(DISPLAY_SERVICE) as DisplayManager).registerDisplayListener(dlist, loop)
+                  if (Build.VERSION.SDK_INT >= 29) {
+                      val pm = getSystemService(POWER_SERVICE) as PowerManager
+                      pm.addThermalStatusListener(loop) { st -> thermalLow = st >= PowerManager.THERMAL_STATUS_LIGHT }
+                  }
+              }
+              override fun onStartCommand(i: Intent?, f: Int, s: Int): Int {
+                  if (i?.action == A_START) {
+                      notifyFg()
+                      val code = i.getIntExtra(E_CODE, Activity.RESULT_CANCELED)
+                      @Suppress("DEPRECATION") val data = i.getParcelableExtra<Intent>(E_DATA)
+                      if (code == Activity.RESULT_OK && data != null) begin(code, data)
+                      return START_STICKY
+                  }
+                  notifyFg()
+                  return START_STICKY
+              }
+              private fun notifyFg() {
+                  val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+                  if (nm.getNotificationChannel(CH) == null) {
+                      nm.createNotificationChannel(
+                          NotificationChannel(CH, "Servicio", NotificationManager.IMPORTANCE_LOW)
+                              .apply { setShowBadge(false); enableVibration(false); setSound(null, null) })
+                  }
+                  val n = NotificationCompat.Builder(this, CH)
+                      .setContentTitle("Overlay Tools").setContentText("Captura activa")
+                      .setSmallIcon(R.drawable.ic_stat).setOngoing(true).setSilent(true)
+                      .setPriority(NotificationCompat.PRIORITY_LOW).build()
+                  if (Build.VERSION.SDK_INT >= 29)
+                      startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+                  else startForeground(1, n)
+              }
+              private fun begin(code: Int, data: Intent) {
+                  val mpm = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                  val p = mpm.getMediaProjection(code, data) ?: return
+                  proj = p
+                  p.registerCallback(object : MediaProjection.Callback() {
+                      override fun onStop() { proj = null; stopCapture() }
+                  }, loop)
+                  startCapture()
+                  addWindows()
+                  running = true
+                  loop.post(aimLoop)
+              }
+              private fun startCapture() {
+                  val p = proj ?: return
+                  cap?.stop()
+                  val dm = DisplayMetrics()
+                  @Suppress("DEPRECATION") wm.defaultDisplay.getRealMetrics(dm)
+                  val c = Capture(p, dm.widthPixels, dm.heightPixels, dm.densityDpi)
+                  if (c.start()) cap = c else Diag.state = "captura fallida"
+                  det.init()
+                  Diag.model = if (det.ready) "ok" else det.error
+                  Diag.backend = det.backend
+              }
+              private fun stopCapture() { cap?.stop(); cap = null; det.close() }
+              private fun restart() {
+                  loop.post {
+                      try { stopCapture(); removeWindows(); startCapture(); addWindows() } catch (_: Throwable) {}
+                  }
+              }
+              private val aimLoop = object : Runnable {
+                  override fun run() {
+                      if (!running) return
+                      try { tick(); fails = 0 } catch (_: Throwable) {
+                          if (++fails > 3) { fails = 0; restart() }
+                      }
+                      val base = if (thermalLow) 9 else Cfg.fps.coerceIn(5, 30)
+                      loop.postDelayed(this, (1000L / base).coerceAtLeast(28L))
+                  }
+              }
+              private fun tick() {
+                  val c = cap ?: return
+                  val cv = canvas
+                  val bmp = c.latest()
+                  val active = Cfg.enabled && (Cfg.mode == 1 || holdPressed)
+                  val inj = AimAccessibilityService.instance?.injector
+                  if (!det.ready || bmp == null || (inj == null && !ShizukuInjector.ready)) {
+                      Diag.state = if (!det.ready) "modelo no listo" else "sin datos"
+                      cv?.setActive(false); return
+                  }
+                  val s = c.scale
+                  val ax = Cfg.anchorFx * sw
+                  val ay = Cfg.anchorFy * sh
+                  val half = (Cfg.fov * s + 26f).toInt()
+                  val l = (ax * s - half).toInt().coerceIn(0, (bmp.width - 4).coerceAtLeast(0))
+                  val t = (ay * s - half).toInt().coerceIn(0, (bmp.height - 4).coerceAtLeast(0))
+                  val r = (ax * s + half).toInt().coerceIn(l + 2, bmp.width)
+                  val b = (ay * s + half).toInt().coerceIn(t + 2, bmp.height)
+                  val crop: Bitmap = Bitmap.createBitmap(bmp, l, t, r - l, b - t)
+                  val dets = try { det.infer(crop, Cfg.conf, (bmp.height * 0.10f).toInt(), (bmp.width * 0.22f).toInt()) }
+                              finally { crop.recycle() }
+                  Diag.targets = dets.size
+                  val sd = dets.map { Det((it.cx + l) / s, (it.cy + t) / s, it.w / s, it.h / s, it.score) }
+                  cv?.setActive(active)
+                  cv?.setBoxes(sd.map {
+                      floatArrayOf(it.cx - it.w / 2, it.cy - it.h / 2, it.cx + it.w / 2, it.cy + it.h / 2)
+                  })
+                  val shot = aimer.step(sd, ax, ay, SystemClock.uptimeMillis(), active)
+                  Diag.locked = shot != null
+                  Diag.state = if (active) "apuntando" else "listo"
+                  if (shot != null) {
+                      if (ShizukuInjector.ready) {
+                          ShizukuInjector.down(ax, ay)
+                          ShizukuInjector.move(ax + shot.dx, ay + shot.dy)
+                          ShizukuInjector.up(ax + shot.dx, ay + shot.dy)
+                      } else {
+                          inj!!.setStart(ax, ay)
+                          inj.queue(shot.dx, shot.dy, shot.ms)
+                      }
+                  } else if (!active) inj?.end()
+              }
+              private fun addWindows() {
+                  removeWindows()
+                  val host = FrameLayout(this)
+                  val cv = OverlayView(this)
+                  host.addView(cv, FrameLayout.LayoutParams(-1, -1))
+                  val lpc = WindowManager.LayoutParams(-1, -1,
+                      WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                          WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                          WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                          WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                      PixelFormat.TRANSLUCENT)
+                  lpc.gravity = Gravity.TOP or Gravity.START
+                  wm.addView(host, lpc)
+                  canvas = cv
+                  val av = AnchorView(this)
+                  val d = resources.displayMetrics.density
+                  val lpa = WindowManager.LayoutParams((28 * d).toInt(), (28 * d).toInt(),
+                      WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                          WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                      PixelFormat.TRANSLUCENT)
+                  lpa.gravity = Gravity.TOP or Gravity.START
+                  lpa.x = (Cfg.anchorFx * sw - 14 * d).toInt()
+                  lpa.y = (Cfg.anchorFy * sh - 14 * d).toInt()
+                  wm.addView(av, lpa)
+                  anchor = av
+                  val pv = PanelView(this)
+                  pv.onFov = { x -> Cfg.fov = (Cfg.fov + x).coerceIn(80, 600); pv.refresh() }
+                  pv.onSmooth = { x -> Cfg.smoothMsPerPx = ((Cfg.smoothMsPerPx * 100).toInt() + x).coerceIn(20, 150) / 100f; pv.refresh() }
+                  pv.onReact = { x -> Cfg.reactionMs = (Cfg.reactionMs + x).coerceIn(60, 260); pv.refresh() }
+                  pv.onAim = { Cfg.aimPoint = (Cfg.aimPoint + 1) % 3; pv.refresh() }
+                  pv.onMode = { Cfg.mode = (Cfg.mode + 1) % 2; pv.refresh() }
+                  pv.onHold = { h -> holdPressed = h }
+                  pv.onCalibrate = { startActivity(Intent(this, CalibrateActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+                  pv.onSettings = { startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+                  pv.onStop = { Cfg.save(this); stopSelf() }
+                  val lpp = WindowManager.LayoutParams(
+                      WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
+                      WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT)
+                  lpp.gravity = Gravity.TOP or Gravity.START
+                  lpp.x = 18; lpp.y = 90
+                  wm.addView(pv, lpp)
+                  panel = pv
+                  var dx = 0; var dy = 0
+                  pv.setOnTouchListener { v, e ->
+                      when (e.actionMasked) {
+                          MotionEvent.ACTION_DOWN -> {
+                              dx = lpp.x - e.rawX.toInt(); dy = lpp.y - e.rawY.toInt(); false
+                          }
+                          MotionEvent.ACTION_MOVE -> {
+                              lpp.x = e.rawX.toInt() + dx; lpp.y = e.rawY.toInt() + dy
+                              try { wm.updateViewLayout(v, lpp) } catch (_: Throwable) {}
+                              false
+                          }
+                          else -> false
+                      }
+                  }
+              }
+              private fun removeWindows() {
+                  try { panel?.let { wm.removeView(it) } } catch (_: Throwable) {}
+                  try { anchor?.let { wm.removeView(it) } } catch (_: Throwable) {}
+                  try { canvas?.let { wm.removeView(it.parent as View) } } catch (_: Throwable) {}
+                  panel = null; anchor = null; canvas = null
+              }
+              override fun onDestroy() {
+                  running = false
+                  Cfg.save(this)
+                  try { loop.removeCallbacksAndMessages(null) } catch (_: Throwable) {}
+                  try { unregisterReceiver(srecv) } catch (_: Throwable) {}
+                  try { (getSystemService(DISPLAY_SERVICE) as DisplayManager).unregisterDisplayListener(dlist) } catch (_: Throwable) {}
+                  stopCapture()
+                  try { proj?.stop() } catch (_: Throwable) {}
+                  removeWindows()
+                  bg.quitSafely()
+                  Diag.state = "parado"
+                  super.onDestroy()
+              }
+          }
+          EOF
+          echo "servicio ok"- name: Actividades
+    run: |
+      cat > app/src/main/java/com/ovltools/core/OnboardActivity.kt <<'EOF'
+      package com.ovltools.core
+      import android.Manifest
+      import android.content.Intent
+      import android.content.pm.PackageManager
+      import android.net.Uri
+      import android.os.Build
+      import android.os.Bundle
+      import android.provider.Settings
+      import android.widget.Button
+      import android.widget.TextView
+      import androidx.appcompat.app.AppCompatActivity
+      import androidx.core.app.ActivityCompat
+      import androidx.core.content.ContextCompat
+      class OnboardActivity : AppCompatActivity() {
+          private var step = 0
+          private lateinit var title: TextView
+          private lateinit var body: TextView
+          private lateinit var action: Button
+          private lateinit var next: Button
+          private lateinit var state: TextView
+          private val titles = arrayOf("Superposicion", "Accesibilidad", "Captura de pantalla")
+          private val bodies = arrayOf(
+              "Dibuja el circulo de punteria sobre el juego.",
+              "Permite enviar el gesto de apuntado.",
+              "Lee solo la imagen de pantalla, nunca la memoria del juego.")
+          override fun onCreate(b: Bundle?) {
+              super.onCreate(b)
+              if (Build.VERSION.SDK_INT >= 33 &&
+                  ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
+                  ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.POST_NOTIFICATIONS), 7)
+              setContentView(R.layout.activity_onboard)
+              title = findViewById(R.id.obTitle)
+              body = findViewById(R.id.obBody)
+              action = findViewById(R.id.obAction)
+              next = findViewById(R.id.obNext)
+              state = findViewById(R.id.obState)
+              action.setOnClickListener {
+                  when (step) {
+                      0 -> startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
+                      1 -> startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                      else -> open()
+                  }
+              }
+              next.setOnClickListener { if (step < 2) { step++; render() } else open() }
+              render()
+          }
+          private fun open() {
+              startActivity(Intent(this, MainActivity::class.java)); finish()
+          }
+          private fun render() {
+              title.text = titles[step]
+              body.text = bodies[step]
+              action.text = when (step) {
+                  0 -> "Abrir ajuste de superposicion"
+                  1 -> "Abrir ajuste de accesibilidad"
+                  else -> "Continuar"
+              }
+              next.text = if (step < 2) "Saltar / Siguiente" else "Entrar"
+          }
+          override fun onResume() {
+              super.onResume()
+              val ok = when (step) {
+                  0 -> Settings.canDrawOverlays(this)
+                  1 -> AimAccessibilityService.alive()
+                  else -> true
+              }
+              state.text = if (ok) "Estado: concedido" else "Estado: pendiente"
+          }
+      }
+      EOF
+
+      cat > app/src/main/java/com/ovltools/core/CalibrateActivity.kt <<'EOF'
+      package com.ovltools.core
+      import android.os.Bundle
+      import android.view.MotionEvent
+      import android.view.View
+      import android.widget.Button
+      import android.widget.TextView
+      import androidx.appcompat.app.AppCompatActivity
+      import kotlin.math.hypot
+      class CalibrateActivity : AppCompatActivity() {
+          private var fx = -1f
+          private var fy = -1f
+          private lateinit var info: TextView
+          override fun onCreate(b: Bundle?) {
+              super.onCreate(b)
+              setContentView(R.layout.activity_calibrate)
+              info = findViewById(R.id.calInfo)
+              val area = findViewById<View>(R.id.calArea)
+              area.setOnTouchListener { _, e ->
+                  if (e.actionMasked == MotionEvent.ACTION_UP) {
+                      if (fx < 0f) {
+                          fx = e.x; fy = e.y
+                          info.text = "Punto marcado. Pulsa ENVIAR GESTO y vuelve a tocar el MISMO punto."
+                      } else {
+                          val d = hypot(e.x - fx, e.y - fy)
+                          if (d < 20f) info.text = "Muy corto. Repite."
+                          else {
+                              val g = (d / 200f).coerceIn(0.2f, 3f)
+                              Cfg.gain = g; Cfg.save(this)
+                              info.text = "Ganancia %.2f guardada.".format(g)
+                              fx = -1f
+                          }
+                      }
+                  }
+                  true
+              }
+              findViewById<Button>(R.id.calSend).setOnClickListener {
+                  if (fx < 0f) { info.text = "Toca primero un punto fijo."; return@setOnClickListener }
+                  val inj = AimAccessibilityService.instance?.injector
+                  if (inj == null) { info.text = "Accesibilidad no activa."; return@setOnClickListener }
+                  val cx = resources.displayMetrics.widthPixels / 2f
+                  val cy = resources.displayMetrics.heightPixels / 2f
+                  inj.setStart(cx, cy)
+                  inj.queue(200f, 0f, 120)
+                  info.text = "Gesto enviado. Vuelve a tocar el MISMO punto del mapa."
+              }
+              findViewById<Button>(R.id.calReset).setOnClickListener {
+                  Cfg.gain = 1f; Cfg.save(this); fx = -1f
+                  info.text = "Ganancia a 1.00."
+              }
+              findViewById<Button>(R.id.calClose).setOnClickListener { finish() }
+              info.text = "1) Toca un punto fijo. 2) Envia el gesto. 3) Toca el mismo punto."
+          }
+      }
+      EOF
+
+      cat > app/src/main/java/com/ovltools/core/MainActivity.kt <<'EOF'
+      package com.ovltools.core
+      import android.app.Activity
+      import android.content.Intent
+      import android.media.projection.MediaProjectionManager
+      import android.net.Uri
+      import android.os.Build
+      import android.os.Bundle
+      import android.os.Handler
+      import android.os.Looper
+      import android.provider.Settings
+      import android.widget.*
+      import androidx.appcompat.app.AppCompatActivity
+      class MainActivity : AppCompatActivity() {
+          private lateinit var status: TextView
+          private val ui = Handler(Looper.getMainLooper())
+          private var mute = false
+          override fun onCreate(b: Bundle?) {
+              super.onCreate(b)
+              setContentView(R.layout.activity_main)
+              Cfg.load(this)
+              status = findViewById(R.id.status)
+              findViewById<Button>(R.id.btnStart).setOnClickListener { start() }
+              findViewById<Button>(R.id.btnStop).setOnClickListener {
+                  stopService(Intent(this, OverlayService::class.java)); refresh()
+              }
+              findViewById<Button>(R.id.btnCalib).setOnClickListener {
+                  startActivity(Intent(this, CalibrateActivity::class.java))
+              }
+              findViewById<Button>(R.id.btnOverlay).setOnClickListener {
+                  startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
+              }
+              findViewById<Button>(R.id.btnAcc).setOnClickListener {
+                  startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+              }
+              findViewById<Button>(R.id.btnSaveP).setOnClickListener {
+                  val n = findViewById<EditText>(R.id.etProfile).text.toString().trim()
+                  if (n.isNotEmpty()) { ProfileStore.save(this, n); Toast.makeText(this, "Guardado", Toast.LENGTH_SHORT).show() }
+              }
+              findViewById<Button>(R.id.btnLoadP).setOnClickListener {
+                  val n = findViewById<EditText>(R.id.etProfile).text.toString().trim()
+                  if (ProfileStore.load(this, n)) { mute = true; recreate() }
+              }
+              findViewById<Button>(R.id.btnDelP).setOnClickListener {
+                  val n = findViewById<EditText>(R.id.etProfile).text.toString().trim()
+                  ProfileStore.delete(this, n)
+              }
+              findViewById<Button>(R.id.btnExp).setOnClickListener {
+                  startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT)
+                      .setType("application/json").putExtra(Intent.EXTRA_TITLE, "ovl.json"), 21)
+              }
+              findViewById<Button>(R.id.btnImp).setOnClickListener {
+                  startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).setType("*/*"), 22)
+              }
+              bind()
+              ui.post(tick)
+          }
+          private fun bind() {
+              sb(R.id.sbFov, 520, Cfg.fov - 80) { Cfg.fov = 80 + it }
+              sb(R.id.sbSmooth, 130, (Cfg.smoothMsPerPx * 100).toInt() - 20) { Cfg.smoothMsPerPx = (it + 20) / 100f }
+              sb(R.id.sbReact, 200, Cfg.reactionMs - 60) { Cfg.reactionMs = it + 60 }
+              sb(R.id.sbJitter, 60, (Cfg.jitter * 10).toInt()) { Cfg.jitter = it / 10f }
+              sb(R.id.sbConf, 75, (Cfg.conf * 100).toInt() - 15) { Cfg.conf = (it + 15) / 100f }
+              sb(R.id.sbFps, 25, Cfg.fps - 5) { Cfg.fps = it + 5 }
+              sb(R.id.sbGain, 180, (Cfg.gain * 100).toInt() - 40) { Cfg.gain = (it + 40) / 100f }
+              sp(R.id.spAim, listOf("Cabeza", "Cuello", "Pecho"), Cfg.aimPoint) { Cfg.aimPoint = it }
+              sp(R.id.spMode, listOf("Mantener boton", "Siempre"), Cfg.mode) { Cfg.mode = it }
+              val sw = findViewById<Switch>(R.id.swBoxes)
+              sw.isChecked = Cfg.showBoxes
+              sw.setOnCheckedChangeListener { _, v -> if (!mute) { Cfg.showBoxes = v; Cfg.save(this) } }
+          }
+          private fun sb(id: Int, max: Int, prog: Int, f: (Int) -> Unit) {
+              val s = findViewById<SeekBar>(id)
+              s.max = max; s.progress = prog.coerceIn(0, max)
+              s.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                  override fun onProgressChanged(x: SeekBar?, p: Int, u: Boolean) {
+                      if (!mute) { f(p); Cfg.save(this@MainActivity) }
+                  }
+                  override fun onStartTrackingTouch(x: SeekBar?) {}
+                  override fun onStopTrackingTouch(x: SeekBar?) {}
+              })
+          }
+          private fun sp(id: Int, items: List<String>, sel: Int, f: (Int) -> Unit) {
+              val s = findViewById<Spinner>(id)
+              s.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, items)
+              s.setSelection(sel.coerceIn(0, items.size - 1))
+              s.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+                  override fun onItemSelected(a: AdapterView<*>?, v: android.view.View?, p: Int, i: Long) {
+                      if (!mute) { f(p); Cfg.save(this@MainActivity) }
+                  }
+                  override fun onNothingSelected(a: AdapterView<*>?) {}
+              }
+          }
+          private fun start() {
+              if (!Settings.canDrawOverlays(this)) { Toast.makeText(this, "Falta superposicion", Toast.LENGTH_SHORT).show(); return }
+              if (!AimAccessibilityService.alive()) { Toast.makeText(this, "Activa accesibilidad", Toast.LENGTH_SHORT).show(); return }
+              val m = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+              startActivityForResult(m.createScreenCaptureIntent(), 20)
+          }
+          @Deprecated("Deprecated in Java")
+          override fun onActivityResult(r: Int, res: Int, d: Intent?) {
+              super.onActivityResult(r, res, d)
+              when (r) {
+                  20 -> {
+                      if (res != Activity.RESULT_OK || d == null) return
+                      val i = Intent(this, OverlayService::class.java)
+                          .setAction(OverlayService.A_START)
+                          .putExtra(OverlayService.E_CODE, res)
+                          .putExtra(OverlayService.E_DATA, d)
+                      if (Build.VERSION.SDK_INT >= 26) startForegroundService(i) else startService(i)
+                      Toast.makeText(this, "Activo", Toast.LENGTH_SHORT).show()
+                  }
+                  21 -> d?.data?.let { u ->
+                      runCatching { contentResolver.openOutputStream(u)?.use { it.write(ProfileStore.exportJson().toByteArray()) } }
+                  }
+                  22 -> d?.data?.let { u ->
+                      runCatching {
+                          val t = contentResolver.openInputStream(u)?.bufferedReader()?.use { it.readText() } ?: ""
+                          if (ProfileStore.importJson(this, t)) { mute = true; recreate() }
+                      }
+                  }
+              }
+          }
+          private val tick = object : Runnable {
+              override fun run() { refresh(); ui.postDelayed(this, 700) }
+          }
+          private fun refresh() {
+              val ov = if (Settings.canDrawOverlays(this)) "ok" else "falta"
+              val ac = if (AimAccessibilityService.alive()) "ok" else "falta"
+              val st = if (OverlayService.running) "activo" else "parado"
+              status.text = "Overlay: $ov - Accesibilidad: $ac - Servicio: $st\n" +
+                  "Modelo: ${Diag.model} (${Diag.backend})\n" +
+                  "Inferencia ${"%.0f".format(Diag.infMs)} ms - Obj ${Diag.targets} - ${Diag.state}"
+          }
+          override fun onResume() { super.onResume(); refresh() }
+          override fun onDestroy() { ui.removeCallbacksAndMessages(null); super.onDestroy() }
+      }
+      EOF
+      echo "actividades ok"- name: Layouts
+        run: |
+          cat > app/src/main/res/layout/activity_onboard.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:orientation="vertical" android:padding="28dp" android:gravity="center"
+              android:layout_width="match_parent" android:layout_height="match_parent">
+              <TextView android:id="@+id/obTitle" android:layout_width="match_parent"
+                  android:layout_height="wrap_content" android:textSize="24sp" android:textColor="@color/fg" />
+              <TextView android:id="@+id/obBody" android:layout_width="match_parent"
+                  android:layout_height="wrap_content" android:paddingTop="10dp" android:textSize="15sp"
+                  android:textColor="@color/fg" />
+              <TextView android:id="@+id/obState" android:layout_width="match_parent"
+                  android:layout_height="wrap_content" android:paddingTop="16dp" android:textSize="13sp"
+                  android:textColor="@color/acc" />
+              <Button android:id="@+id/obAction" android:layout_width="match_parent"
+                  android:layout_height="wrap_content" android:layout_marginTop="24dp" />
+              <Button android:id="@+id/obNext" android:layout_width="match_parent"
+                  android:layout_height="wrap_content" android:layout_marginTop="8dp" />
+          </LinearLayout>
+          EOF
+
+          cat > app/src/main/res/layout/activity_calibrate.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:orientation="vertical" android:layout_width="match_parent" android:layout_height="match_parent">
+              <TextView android:id="@+id/calInfo" android:layout_width="match_parent"
+                  android:layout_height="wrap_content" android:padding="12dp" android:textColor="@color/fg"
+                  android:textSize="13sp" />
+              <View android:id="@+id/calArea" android:layout_width="match_parent"
+                  android:layout_height="0dp" android:layout_weight="1" android:background="#2200E676" />
+              <Button android:id="@+id/calSend" android:layout_width="match_parent"
+                  android:layout_height="wrap_content" android:text="Enviar gesto de 200 px" />
+              <Button android:id="@+id/calReset" android:layout_width="match_parent"
+                  android:layout_height="wrap_content" android:text="Reiniciar ganancia a 1.00" />
+              <Button android:id="@+id/calClose" android:layout_width="match_parent"
+                  android:layout_height="wrap_content" android:text="Cerrar" />
+          </LinearLayout>
+          EOF
+
+          cat > app/src/main/res/layout/activity_main.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+              android:layout_width="match_parent" android:layout_height="match_parent"
+              android:padding="16dp" android:background="@color/bg">
+              <LinearLayout android:orientation="vertical" android:layout_width="match_parent"
+                  android:layout_height="wrap_content">
+                  <TextView android:id="@+id/status" android:layout_width="match_parent"
+                      android:layout_height="wrap_content" android:textSize="12sp" android:textColor="@color/fg" />
+                  <Button android:id="@+id/btnOverlay" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Permiso superposicion" />
+                  <Button android:id="@+id/btnAcc" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Accesibilidad" />
+                  <Button android:id="@+id/btnStart" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="INICIAR" />
+                  <Button android:id="@+id/btnStop" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Detener todo" />
+                  <Button android:id="@+id/btnCalib" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Calibrador" />
+                  <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="FOV" android:textColor="@color/fg" />
+                  <SeekBar android:id="@+id/sbFov" android:layout_width="match_parent" android:layout_height="wrap_content" />
+                  <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Suavizado ms/px" android:textColor="@color/fg" />
+                  <SeekBar android:id="@+id/sbSmooth" android:layout_width="match_parent" android:layout_height="wrap_content" />
+                  <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Retardo ms" android:textColor="@color/fg" />
+                  <SeekBar android:id="@+id/sbReact" android:layout_width="match_parent" android:layout_height="wrap_content" />
+                  <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Jitter px x10" android:textColor="@color/fg" />
+                  <SeekBar android:id="@+id/sbJitter" android:layout_width="match_parent" android:layout_height="wrap_content" />
+                  <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Confianza" android:textColor="@color/fg" />
+                  <SeekBar android:id="@+id/sbConf" android:layout_width="match_parent" android:layout_height="wrap_content" />
+                  <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="FPS inferencia" android:textColor="@color/fg" />
+                  <SeekBar android:id="@+id/sbFps" android:layout_width="match_parent" android:layout_height="wrap_content" />
+                  <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Ganancia" android:textColor="@color/fg" />
+                  <SeekBar android:id="@+id/sbGain" android:layout_width="match_parent" android:layout_height="wrap_content" />
+                  <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Punto" android:textColor="@color/fg" />
+                  <Spinner android:id="@+id/spAim" android:layout_width="match_parent" android:layout_height="wrap_content" />
+                  <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Modo" android:textColor="@color/fg" />
+                  <Spinner android:id="@+id/spMode" android:layout_width="match_parent" android:layout_height="wrap_content" />
+                  <Switch android:id="@+id/swBoxes" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Dibujar cajas" android:textColor="@color/fg" />
+                  <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Perfil" android:textColor="@color/fg" />
+                  <EditText android:id="@+id/etProfile" android:layout_width="match_parent" android:layout_height="wrap_content" android:hint="nombre" android:textColor="@color/fg" />
+                  <Button android:id="@+id/btnSaveP" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Guardar" />
+                  <Button android:id="@+id/btnLoadP" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Cargar" />
+                  <Button android:id="@+id/btnDelP" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Borrar" />
+                  <Button android:id="@+id/btnExp" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Exportar JSON" />
+                  <Button android:id="@+id/btnImp" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Importar JSON" />
+              </LinearLayout>
+          </ScrollView>
+          EOF
+          echo "layouts ok"- name: Modelo
+    run: |
+      python3 -m pip install --quiet ultralytics
+      python3 tools/export_model.py
+      ls -l app/src/main/assets
+
+  - name: Build
+    run: gradle :app:assembleRelease --no-daemon
+
+  - uses: actions/upload-artifact@v4
+    with:
+      name: OverlayTools-apk
+      path: app/build/outputs/apk/release/*.apk
